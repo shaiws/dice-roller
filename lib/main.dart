@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -14,7 +15,6 @@ class DiceRollerApp extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
         title: 'Dice Roller',
         debugShowCheckedModeBanner: false,
-        theme: ThemeData.dark(),
         home: const DiceRollerScreen(),
       );
 }
@@ -34,148 +34,209 @@ class V3 {
 
 V3 rotX(V3 v, double a) => V3(v.x, v.y * cos(a) - v.z * sin(a), v.y * sin(a) + v.z * cos(a));
 V3 rotY(V3 v, double a) => V3(v.x * cos(a) + v.z * sin(a), v.y, -v.x * sin(a) + v.z * cos(a));
-V3 rot(V3 v, double rx, double ry) => rotY(rotX(v, rx), ry);
+V3 applyRot(V3 v, double rx, double ry) => rotY(rotX(v, rx), ry);
 
-Offset proj(V3 v, double fov, Offset c) {
+Offset project(V3 v, double fov, Offset center) {
   final z = v.z + fov;
   final s = fov / z;
-  return Offset(c.dx + v.x * s, c.dy + v.y * s);
+  return Offset(center.dx + v.x * s, center.dy + v.y * s);
 }
 
-// ─── Pip layouts (normalized -0.5..0.5) ───────────────────────────────────────
+// ─── Pip layouts ──────────────────────────────────────────────────────────────
 
 const _pips = [
   <Offset>[],
   [Offset(0, 0)],
-  [Offset(-0.28, -0.28), Offset(0.28, 0.28)],
-  [Offset(-0.28, -0.28), Offset(0, 0), Offset(0.28, 0.28)],
-  [Offset(-0.28, -0.28), Offset(0.28, -0.28), Offset(-0.28, 0.28), Offset(0.28, 0.28)],
-  [Offset(-0.28, -0.28), Offset(0.28, -0.28), Offset(0, 0), Offset(-0.28, 0.28), Offset(0.28, 0.28)],
-  [Offset(-0.28, -0.28), Offset(0.28, -0.28), Offset(-0.28, 0), Offset(0.28, 0), Offset(-0.28, 0.28), Offset(0.28, 0.28)],
+  [Offset(-0.3, -0.3), Offset(0.3, 0.3)],
+  [Offset(-0.3, -0.3), Offset(0, 0), Offset(0.3, 0.3)],
+  [Offset(-0.3, -0.3), Offset(0.3, -0.3), Offset(-0.3, 0.3), Offset(0.3, 0.3)],
+  [Offset(-0.3, -0.3), Offset(0.3, -0.3), Offset(0, 0), Offset(-0.3, 0.3), Offset(0.3, 0.3)],
+  [Offset(-0.3, -0.3), Offset(0.3, -0.3), Offset(-0.3, 0), Offset(0.3, 0), Offset(-0.3, 0.3), Offset(0.3, 0.3)],
 ];
 
-// Face order: +Z,-Z,+X,-X,+Y,-Y  →  values 1,6,2,5,3,4
-const _faceVal = [1, 6, 2, 5, 3, 4];
+// Face order: +Z,-Z,+X,-X,+Y,-Y → values 1,6,2,5,3,4
+const _faceValues = [1, 6, 2, 5, 3, 4];
 
-// Target rotations to show each face value facing camera
 const _targetRot = {
   1: [0.0,    0.0],
   6: [0.0,    pi],
-  2: [0.0,   -pi/2],
-  5: [0.0,    pi/2],
-  3: [-pi/2,  0.0],
-  4: [ pi/2,  0.0],
+  2: [0.0,   -pi / 2],
+  5: [0.0,    pi / 2],
+  3: [-pi / 2, 0.0],
+  4: [pi / 2,  0.0],
 };
 
 // ─── Die Painter ─────────────────────────────────────────────────────────────
 
 class DiePainter extends CustomPainter {
-  final double rx, ry, size;
-  DiePainter({required this.rx, required this.ry, this.size = 130});
+  final double rx, ry, dieSize;
+  DiePainter({required this.rx, required this.ry, required this.dieSize});
 
-  static const double s = 0.5;
+  static const double _s = 0.5;
   static const _verts = [
-    V3(-s,-s,-s), V3( s,-s,-s), V3( s, s,-s), V3(-s, s,-s),
-    V3(-s,-s, s), V3( s,-s, s), V3( s, s, s), V3(-s, s, s),
+    V3(-_s,-_s,-_s), V3(_s,-_s,-_s), V3(_s,_s,-_s), V3(-_s,_s,-_s),
+    V3(-_s,-_s,_s),  V3(_s,-_s,_s),  V3(_s,_s,_s),  V3(-_s,_s,_s),
   ];
-  static const _faces = [
+  static const _faceIdx = [
     [4,5,6,7], [1,0,3,2], [5,1,2,6], [0,4,7,3], [7,6,2,3], [0,1,5,4],
   ];
   static const _normals = [
     V3(0,0,1), V3(0,0,-1), V3(1,0,0), V3(-1,0,0), V3(0,1,0), V3(0,-1,0),
   ];
-  static const _light = V3(0.55, -0.75, 0.55);
+  // Key light from upper-left-front
+  static const _light    = V3(-0.4, -0.8, 0.6);
+  // Fill light from lower-right
+  static const _fillLight = V3(0.6,  0.4, 0.4);
 
   @override
   void paint(Canvas canvas, Size sz) {
-    final c = Offset(sz.width / 2, sz.height / 2);
-    final fov = size * 2.8;
-    final verts = _verts.map((v) => rot(v * size, rx, ry)).toList();
+    final c   = Offset(sz.width / 2, sz.height / 2);
+    final fov = dieSize * 2.6;
+    final verts = _verts.map((v) => applyRot(v * dieSize, rx, ry)).toList();
     final lightN = _light.norm;
+    final fillN  = _fillLight.norm;
 
-    // Build visible faces
-    final faces = <_Face>[];
+    // Gather visible faces + depth sort
+    final faces = <_FaceData>[];
     for (int i = 0; i < 6; i++) {
-      final rn = rot(_normals[i], rx, ry);
+      final rn = applyRot(_normals[i], rx, ry);
       if (rn.z < 0) continue;
-      final pts = _faces[i].map((idx) => proj(verts[idx], fov, c)).toList();
-      final v3s = _faces[i].map((idx) => verts[idx]).toList();
+      final idxList = _faceIdx[i];
+      final pts  = idxList.map((j) => project(verts[j], fov, c)).toList();
+      final v3s  = idxList.map((j) => verts[j]).toList();
       final avgZ = v3s.fold(0.0, (s, v) => s + v.z) / 4;
-      final diff = max(0.0, rn.norm.dot(lightN));
-      faces.add(_Face(i, _faceVal[i], pts, v3s, (0.3 + diff * 0.7).clamp(0, 1), avgZ));
+      final rnN  = rn.norm;
+      final diff  = max(0.0, rnN.dot(lightN));
+      final fill  = max(0.0, rnN.dot(fillN)) * 0.25;
+      final bright = (0.22 + diff * 0.6 + fill).clamp(0.0, 1.0);
+      faces.add(_FaceData(i, _faceValues[i], pts, v3s, bright, avgZ, rnN));
     }
     faces.sort((a, b) => a.avgZ.compareTo(b.avgZ));
 
-    for (final f in faces) {
-      _drawFace(canvas, f, fov, c);
+    // Draw shadow first (ground shadow ellipse)
+    final shadowPaint = Paint()
+      ..color = Colors.black.withOpacity(0.35)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 18);
+    canvas.drawOval(
+      Rect.fromCenter(center: Offset(c.dx + 14, c.dy + dieSize * 0.62),
+          width: dieSize * 1.35, height: dieSize * 0.32),
+      shadowPaint,
+    );
+
+    for (final face in faces) {
+      _drawFace(canvas, face, fov, c);
     }
   }
 
-  void _drawFace(Canvas canvas, _Face f, double fov, Offset c) {
+  void _drawFace(Canvas canvas, _FaceData f, double fov, Offset c) {
     final path = Path()..moveTo(f.pts[0].dx, f.pts[0].dy);
     for (int i = 1; i < f.pts.length; i++) path.lineTo(f.pts[i].dx, f.pts[i].dy);
     path.close();
 
     final b = f.brightness;
 
-    // Face fill — ivory with lighting
+    // Base face color — crisp white/ivory
+    final faceColor = Color.fromARGB(
+      255,
+      (248 * b).round().clamp(60, 255),
+      (242 * b).round().clamp(55, 255),
+      (228 * b).round().clamp(45, 255),
+    );
+
+    // Face fill
     canvas.drawPath(path, Paint()
-      ..color = Color.fromARGB(255, (238*b).round().clamp(0,255), (222*b).round().clamp(0,255), (196*b).round().clamp(0,255))
+      ..color = faceColor
       ..style = PaintingStyle.fill);
 
-    // Subtle gloss highlight (top-left of face)
-    final gloss = Path()..moveTo(f.pts[0].dx, f.pts[0].dy);
-    gloss.lineTo(f.pts[1].dx, f.pts[1].dy);
-    gloss.lineTo((f.pts[1].dx + f.pts[2].dx)/2, (f.pts[1].dy + f.pts[2].dy)/2);
-    gloss.lineTo((f.pts[0].dx + f.pts[3].dx)/2, (f.pts[0].dy + f.pts[3].dy)/2);
-    gloss.close();
-    canvas.drawPath(gloss, Paint()
-      ..color = Colors.white.withOpacity(0.12 * b)
+    // Gradient overlay: simulate rounded-cube look by darkening edges
+    final faceBounds = path.getBounds();
+    final gradientPaint = Paint()
+      ..shader = ui.Gradient.radial(
+        Offset(faceBounds.left + faceBounds.width * 0.38,
+               faceBounds.top  + faceBounds.height * 0.35),
+        faceBounds.longestSide * 0.7,
+        [Colors.white.withOpacity(0.18 * b), Colors.black.withOpacity(0.22)],
+        [0.0, 1.0],
+      )
+      ..style = PaintingStyle.fill;
+    canvas.save();
+    canvas.clipPath(path);
+    canvas.drawRect(faceBounds.inflate(4), gradientPaint);
+    canvas.restore();
+
+    // Bevel highlight — top/left edges
+    final bevel = Path()
+      ..moveTo(f.pts[0].dx, f.pts[0].dy)
+      ..lineTo(f.pts[1].dx, f.pts[1].dy)
+      ..lineTo(f.pts[1].dx * 0.92 + f.pts[2].dx * 0.08,
+               f.pts[1].dy * 0.92 + f.pts[2].dy * 0.08)
+      ..lineTo(f.pts[0].dx * 0.92 + f.pts[3].dx * 0.08,
+               f.pts[0].dy * 0.92 + f.pts[3].dy * 0.08)
+      ..close();
+    canvas.drawPath(bevel, Paint()
+      ..color = Colors.white.withOpacity(0.28 * b)
       ..style = PaintingStyle.fill);
 
-    // Edge
+    // Edge outline
     canvas.drawPath(path, Paint()
-      ..color = Colors.black.withOpacity(0.35)
+      ..color = Colors.black.withOpacity(0.55)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.8);
+      ..strokeWidth = 2.0
+      ..strokeJoin = StrokeJoin.round);
 
     _drawPips(canvas, f, fov, c);
   }
 
-  void _drawPips(Canvas canvas, _Face f, double fov, Offset c) {
+  void _drawPips(Canvas canvas, _FaceData f, double fov, Offset c) {
     final v = f.value;
     if (v < 1 || v > 6) return;
 
     final v0 = f.v3s[0], v1 = f.v3s[1], v3 = f.v3s[3];
     final uAxis = (v1 - v0).norm;
     final vAxis = (v3 - v0).norm;
-    final fc = V3(
+    final fc    = V3(
       f.v3s.fold(0.0, (s, v) => s + v.x) / 4,
       f.v3s.fold(0.0, (s, v) => s + v.y) / 4,
       f.v3s.fold(0.0, (s, v) => s + v.z) / 4,
     );
 
-    final pipR3D = size * 0.068;
-    final pipColor = Color.fromARGB(255, (110*f.brightness).round().clamp(0,255), (12*f.brightness).round().clamp(0,255), (12*f.brightness).round().clamp(0,255));
+    final spread  = dieSize * 0.50;
+    final pipR3D  = dieSize * 0.072;
+    final b = f.brightness;
 
     for (final pip in _pips[v]) {
-      final spread = size * 0.52;
       final p3D = V3(
-        fc.x + uAxis.x*pip.dx*spread + vAxis.x*pip.dy*spread,
-        fc.y + uAxis.y*pip.dx*spread + vAxis.y*pip.dy*spread,
-        fc.z + uAxis.z*pip.dx*spread + vAxis.z*pip.dy*spread,
+        fc.x + uAxis.x * pip.dx * spread + vAxis.x * pip.dy * spread,
+        fc.y + uAxis.y * pip.dx * spread + vAxis.y * pip.dy * spread,
+        fc.z + uAxis.z * pip.dx * spread + vAxis.z * pip.dy * spread,
       );
-      final p2D = proj(p3D, fov, c);
-      final edge3D = V3(p3D.x + uAxis.x*pipR3D, p3D.y + uAxis.y*pipR3D, p3D.z + uAxis.z*pipR3D);
-      final r2D = (proj(edge3D, fov, c) - p2D).distance.clamp(3.0, 22.0);
+      final pC = project(p3D, fov, c);
+      final pEdge = project(
+        V3(p3D.x + uAxis.x * pipR3D, p3D.y + uAxis.y * pipR3D, p3D.z + uAxis.z * pipR3D),
+        fov, c,
+      );
+      final r = (pEdge - pC).distance.clamp(4.0, 28.0);
 
-      // Pip shadow
-      canvas.drawCircle(Offset(p2D.dx+r2D*0.15, p2D.dy+r2D*0.15), r2D, Paint()..color = Colors.black.withOpacity(0.25));
-      // Pip fill
-      canvas.drawCircle(p2D, r2D, Paint()..color = pipColor);
+      // Pip indent shadow
+      canvas.drawCircle(pC, r + 1.5, Paint()
+        ..color = Colors.black.withOpacity(0.45)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.5));
+
+      // Pip fill — deep red
+      final pipColor = Color.fromARGB(
+        255,
+        (185 * b).round().clamp(40, 220),
+        (15  * b).round().clamp(3,  30),
+        (15  * b).round().clamp(3,  30),
+      );
+      canvas.drawCircle(pC, r, Paint()..color = pipColor);
+
       // Pip gloss
-      canvas.drawCircle(Offset(p2D.dx - r2D*0.28, p2D.dy - r2D*0.28), r2D*0.32,
-          Paint()..color = Colors.white.withOpacity(0.22));
+      canvas.drawCircle(
+        Offset(pC.dx - r * 0.30, pC.dy - r * 0.32),
+        r * 0.35,
+        Paint()..color = Colors.white.withOpacity(0.28 * b),
+      );
     }
   }
 
@@ -183,12 +244,13 @@ class DiePainter extends CustomPainter {
   bool shouldRepaint(DiePainter o) => o.rx != rx || o.ry != ry;
 }
 
-class _Face {
+class _FaceData {
   final int idx, value;
   final List<Offset> pts;
   final List<V3> v3s;
   final double brightness, avgZ;
-  _Face(this.idx, this.value, this.pts, this.v3s, this.brightness, this.avgZ);
+  final V3 normal;
+  _FaceData(this.idx, this.value, this.pts, this.v3s, this.brightness, this.avgZ, this.normal);
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -205,11 +267,11 @@ class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProvider
   bool _rolling = false;
   final _rand = Random();
 
-  List<double> _rx = [0.4];
-  List<double> _ry = [0.6];
+  List<double> _rx = [0.5];
+  List<double> _ry = [0.8];
   List<AnimationController> _ctrls = [];
-  List<Animation<double>> _rxAnims = [];
-  List<Animation<double>> _ryAnims = [];
+  List<Animation<double>> _rxA = [];
+  List<Animation<double>> _ryA = [];
 
   @override
   void initState() {
@@ -219,12 +281,12 @@ class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProvider
 
   void _initDice(int n) {
     for (final c in _ctrls) c.dispose();
-    _rx = List.filled(n, 0.4);
-    _ry = List.filled(n, 0.6);
+    _rx = List.generate(n, (_) => 0.4 + _rand.nextDouble() * 0.3);
+    _ry = List.generate(n, (_) => 0.5 + _rand.nextDouble() * 0.4);
     _results = List.filled(n, 1);
-    _ctrls = List.generate(n, (_) => AnimationController(vsync: this, duration: const Duration(milliseconds: 1800)));
-    _rxAnims = List.filled(n, const AlwaysStoppedAnimation(0));
-    _ryAnims = List.filled(n, const AlwaysStoppedAnimation(0));
+    _ctrls = List.generate(n, (_) => AnimationController(vsync: this, duration: const Duration(milliseconds: 1600)));
+    _rxA = List.filled(n, const AlwaysStoppedAnimation(0));
+    _ryA = List.filled(n, const AlwaysStoppedAnimation(0));
   }
 
   @override
@@ -244,25 +306,26 @@ class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProvider
     for (int i = 0; i < _numDice; i++) {
       final tgt = _targetRot[newResults[i]]!;
       final sRx = _rx[i], sRy = _ry[i];
-      final eRx = sRx + pi * (4 + _rand.nextInt(3)) + tgt[0];
-      final eRy = sRy + pi * (4 + _rand.nextInt(3)) + tgt[1];
+      final spins = 3 + _rand.nextInt(3);
+      final eRx = sRx + pi * spins * (1 + _rand.nextDouble()) + tgt[0];
+      final eRy = sRy + pi * spins * (1 + _rand.nextDouble()) + tgt[1];
 
       _ctrls[i].reset();
-      _rxAnims[i] = Tween(begin: sRx, end: eRx)
-          .animate(CurvedAnimation(parent: _ctrls[i], curve: Curves.easeInOutCubic));
-      _ryAnims[i] = Tween(begin: sRy, end: eRy)
-          .animate(CurvedAnimation(parent: _ctrls[i], curve: Curves.easeInOutCubic));
+      _rxA[i] = Tween(begin: sRx, end: eRx)
+          .animate(CurvedAnimation(parent: _ctrls[i], curve: Curves.easeInOutQuart));
+      _ryA[i] = Tween(begin: sRy, end: eRy)
+          .animate(CurvedAnimation(parent: _ctrls[i], curve: Curves.easeInOutQuart));
 
       _ctrls[i].addListener(() => setState(() {
-        _rx[i] = _rxAnims[i].value;
-        _ry[i] = _ryAnims[i].value;
+        _rx[i] = _rxA[i].value;
+        _ry[i] = _ryA[i].value;
       }));
 
-      futures.add(Future.delayed(Duration(milliseconds: i * 120), () => _ctrls[i].forward()));
+      futures.add(Future.delayed(Duration(milliseconds: i * 100), () => _ctrls[i].forward()));
     }
 
     await Future.wait(futures);
-    await Future.delayed(Duration(milliseconds: 1800 + (_numDice - 1) * 120));
+    await Future.delayed(Duration(milliseconds: 1600 + (_numDice - 1) * 100));
 
     if (mounted) setState(() { _results = newResults; _rolling = false; });
     HapticFeedback.lightImpact();
@@ -273,137 +336,183 @@ class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProvider
     setState(() { _numDice = n; _initDice(n); });
   }
 
-  List<Offset> _positions(int n) => switch (n) {
-    1 => [Offset.zero],
-    2 => [const Offset(-0.28, 0), const Offset(0.28, 0)],
-    3 => [const Offset(-0.38, -0.15), const Offset(0, 0.15), const Offset(0.38, -0.15)],
-    4 => [const Offset(-0.28, -0.2), const Offset(0.28, -0.2), const Offset(-0.28, 0.2), const Offset(0.28, 0.2)],
-    5 => [const Offset(-0.38, -0.2), const Offset(0, -0.2), const Offset(0.38, -0.2), const Offset(-0.19, 0.2), const Offset(0.19, 0.2)],
-    _ => [Offset.zero],
-  };
-
   @override
   Widget build(BuildContext context) {
     final sw = MediaQuery.of(context).size.width;
     final sh = MediaQuery.of(context).size.height;
-    final dieSize = _numDice == 1 ? sw * 0.36 : (_numDice <= 2 ? sw * 0.26 : sw * 0.20);
     final sum = _results.fold(0, (a, b) => a + b);
-    final pos = _positions(_numDice);
+
+    // Die size and grid positions
+    final dieSize = _numDice == 1
+        ? sw * 0.38
+        : _numDice <= 2
+            ? sw * 0.28
+            : sw * 0.22;
+    final cellW = dieSize * 2.3;
+    final cellH = dieSize * 2.3;
+    final cols  = _numDice <= 3 ? _numDice : (_numDice == 4 ? 2 : 3);
+    final rows  = (_numDice / cols).ceil();
+    final gridW = cols * cellW;
+    final gridH = rows * cellH;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0A1A10),
-      body: SafeArea(
-        child: Column(children: [
-          // Header
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 14),
-            child: Text('🎲  DICE ROLLER', style: TextStyle(
-              color: Color(0xFFD4AF37), fontSize: 20,
-              fontWeight: FontWeight.bold, letterSpacing: 4,
-            )),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF0D1B2A), Color(0xFF1B3A2D), Color(0xFF0A1A10)],
+            stops: [0.0, 0.5, 1.0],
           ),
-
-          // Count selector
-          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            _iconBtn(Icons.remove, () => _setNum(_numDice - 1), _numDice > 1 && !_rolling),
+        ),
+        child: SafeArea(
+          child: Column(children: [
+            // ── Header ──
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Text('$_numDice ${_numDice == 1 ? 'die' : 'dice'}',
-                  style: const TextStyle(color: Colors.white70, fontSize: 15, letterSpacing: 1)),
-            ),
-            _iconBtn(Icons.add, () => _setNum(_numDice + 1), _numDice < 5 && !_rolling),
-          ]),
-
-          const SizedBox(height: 8),
-
-          // Dice area
-          Expanded(
-            child: Stack(
-              alignment: Alignment.center,
-              children: List.generate(_numDice, (i) {
-                final p = pos[i];
-                return Positioned(
-                  left: sw/2 + p.dx * sw - dieSize/2,
-                  top: sh * 0.18 + p.dy * sh * 0.3 - dieSize/2,
-                  child: GestureDetector(
-                    onPanUpdate: (d) {
-                      if (_rolling) return;
-                      setState(() {
-                        _ry[i] += d.delta.dx * 0.009;
-                        _rx[i] += d.delta.dy * 0.009;
-                      });
-                    },
-                    child: CustomPaint(
-                      size: Size(dieSize * 2, dieSize * 2),
-                      painter: DiePainter(rx: _rx[i], ry: _ry[i], size: dieSize),
+              padding: const EdgeInsets.fromLTRB(24, 20, 24, 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text('DICE ROLLER',
+                    style: TextStyle(
+                      color: Color(0xFFD4AF37),
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 5,
+                    )),
+                  // Count selector
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.07),
+                      borderRadius: BorderRadius.circular(30),
+                      border: Border.all(color: const Color(0xFFD4AF37).withOpacity(0.3)),
                     ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      _cBtn(Icons.remove, () => _setNum(_numDice - 1), _numDice > 1 && !_rolling),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        child: Text('$_numDice',
+                          style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                      ),
+                      _cBtn(Icons.add, () => _setNum(_numDice + 1), _numDice < 5 && !_rolling),
+                    ]),
                   ),
-                );
-              }),
+                ],
+              ),
             ),
-          ),
 
-          // Result
-          AnimatedOpacity(
-            opacity: _rolling ? 0.2 : 1.0,
-            duration: const Duration(milliseconds: 300),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Column(children: [
-                if (_numDice > 1)
-                  Text(_results.join('  +  '), style: const TextStyle(color: Colors.white54, fontSize: 14)),
-                Text(
-                  _numDice > 1 ? 'Sum: $sum' : '${_results[0]}',
-                  style: TextStyle(
-                    color: const Color(0xFFD4AF37),
-                    fontSize: _numDice > 1 ? 26 : 56,
-                    fontWeight: FontWeight.bold,
-                    shadows: const [Shadow(color: Colors.black87, blurRadius: 8)],
+            // ── Dice grid ──
+            Expanded(
+              child: Center(
+                child: SizedBox(
+                  width: gridW,
+                  height: gridH,
+                  child: Wrap(
+                    spacing: 0, runSpacing: 0,
+                    alignment: WrapAlignment.center,
+                    runAlignment: WrapAlignment.center,
+                    children: List.generate(_numDice, (i) => GestureDetector(
+                      onPanUpdate: _rolling ? null : (d) => setState(() {
+                        _ry[i] += d.delta.dx * 0.01;
+                        _rx[i] += d.delta.dy * 0.01;
+                      }),
+                      child: SizedBox(
+                        width: cellW,
+                        height: cellH,
+                        child: CustomPaint(
+                          painter: DiePainter(rx: _rx[i], ry: _ry[i], dieSize: dieSize),
+                        ),
+                      ),
+                    )),
                   ),
-                ),
-              ]),
-            ),
-          ),
-
-          // Roll button
-          Padding(
-            padding: const EdgeInsets.only(bottom: 28, top: 4),
-            child: GestureDetector(
-              onTap: _roll,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
-                padding: const EdgeInsets.symmetric(horizontal: 52, vertical: 16),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(colors: _rolling
-                      ? [const Color(0xFF5A4A10), const Color(0xFF3A300A)]
-                      : [const Color(0xFFD4AF37), const Color(0xFF9B7B1A)]),
-                  borderRadius: BorderRadius.circular(40),
-                  boxShadow: _rolling ? [] : [
-                    BoxShadow(color: const Color(0xFFD4AF37).withOpacity(0.45), blurRadius: 20, spreadRadius: 2)
-                  ],
-                ),
-                child: Text(
-                  _rolling ? 'ROLLING...' : 'R O L L',
-                  style: const TextStyle(color: Colors.black, fontSize: 17, fontWeight: FontWeight.bold, letterSpacing: 3),
                 ),
               ),
             ),
-          ),
-        ]),
+
+            // ── Result display ──
+            AnimatedOpacity(
+              opacity: _rolling ? 0.15 : 1.0,
+              duration: const Duration(milliseconds: 400),
+              child: Column(children: [
+                if (_numDice > 1) ...[
+                  Text(
+                    _results.map((r) => '$r').join('  ＋  '),
+                    style: const TextStyle(color: Color(0xFF8B8B8B), fontSize: 16, letterSpacing: 2),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    const Text('SUM  ', style: TextStyle(color: Color(0xFF8B8B8B), fontSize: 13, letterSpacing: 3)),
+                    Text('$sum',
+                      style: const TextStyle(
+                        color: Color(0xFFD4AF37), fontSize: 36,
+                        fontWeight: FontWeight.w900, letterSpacing: 2,
+                      )),
+                  ]),
+                ] else
+                  Text(
+                    '${_results[0]}',
+                    style: const TextStyle(
+                      color: Color(0xFFD4AF37), fontSize: 72,
+                      fontWeight: FontWeight.w900,
+                      shadows: [Shadow(color: Color(0xFFD4AF37), blurRadius: 24)],
+                    ),
+                  ),
+              ]),
+            ),
+
+            const SizedBox(height: 16),
+
+            // ── Roll button ──
+            Padding(
+              padding: const EdgeInsets.only(bottom: 32),
+              child: GestureDetector(
+                onTap: _roll,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 120),
+                  padding: const EdgeInsets.symmetric(horizontal: 64, vertical: 18),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: _rolling
+                          ? [const Color(0xFF3A2F0A), const Color(0xFF2A2206)]
+                          : [const Color(0xFFE8C547), const Color(0xFFB8920A)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(50),
+                    boxShadow: _rolling ? [] : [
+                      BoxShadow(color: const Color(0xFFD4AF37).withOpacity(0.5),
+                          blurRadius: 24, spreadRadius: 1, offset: const Offset(0, 4)),
+                      BoxShadow(color: const Color(0xFFD4AF37).withOpacity(0.2),
+                          blurRadius: 48, spreadRadius: 4),
+                    ],
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    if (!_rolling) const Text('🎲  ', style: TextStyle(fontSize: 18)),
+                    Text(
+                      _rolling ? 'ROLLING...' : 'ROLL',
+                      style: TextStyle(
+                        color: _rolling ? Colors.white38 : Colors.black,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 4,
+                      ),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+          ]),
+        ),
       ),
     );
   }
 
-  Widget _iconBtn(IconData icon, VoidCallback cb, bool enabled) => GestureDetector(
+  Widget _cBtn(IconData icon, VoidCallback cb, bool enabled) => InkWell(
     onTap: enabled ? cb : null,
-    child: Container(
-      width: 34, height: 34,
-      decoration: BoxDecoration(
-        color: enabled ? const Color(0xFFD4AF37).withOpacity(0.15) : Colors.white10,
-        shape: BoxShape.circle,
-        border: Border.all(color: enabled ? const Color(0xFFD4AF37).withOpacity(0.4) : Colors.white12),
-      ),
-      child: Icon(icon, color: enabled ? const Color(0xFFD4AF37) : Colors.white24, size: 17),
+    borderRadius: BorderRadius.circular(30),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      child: Icon(icon, color: enabled ? const Color(0xFFD4AF37) : Colors.white24, size: 18),
     ),
   );
 }
