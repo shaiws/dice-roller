@@ -1,5 +1,5 @@
 name: dice_roller
-description: "3D Dice Roller using three_dart engine"
+description: "3D Dice Roller"
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -10,8 +10,6 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
-  three_dart: ^0.0.15
-  flutter_gl: ^0.0.21
 
 dev_dependencies:
   flutter_test:
@@ -20,5 +18,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  assets:
-    - assets/

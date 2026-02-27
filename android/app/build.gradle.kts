@@ -42,9 +42,3 @@ android {
 flutter {
     source = "../.."
 }
-
-repositories {
-    flatDir {
-        dirs("libs/aars")
-    }
-}
