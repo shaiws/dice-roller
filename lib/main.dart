@@ -18,7 +18,6 @@ void main() {
 
 class DiceRollerApp extends StatelessWidget {
   const DiceRollerApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -41,148 +40,107 @@ const List<List<Offset>> _pipLayouts = [
   [Offset(-0.28, -0.28), Offset(0.28, -0.28), Offset(-0.28, 0), Offset(0.28, 0), Offset(-0.28, 0.28), Offset(0.28, 0.28)],
 ];
 
-// Generate a die face texture for a given value
-Future<three.Texture> _makeFaceTexture(int value) async {
-  const int size = 256;
-  final recorder = ui.PictureRecorder();
-  final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.toDouble(), size.toDouble()));
+// Face order for BoxGeometry in three_dart: +X,-X,+Y,-Y,+Z,-Z
+const List<int> _faceValues = [2, 5, 1, 6, 3, 4];
 
-  // Background: ivory/cream
-  final bgPaint = Paint()..color = const Color(0xFFF5ECD7);
-  final rrect = RRect.fromRectAndRadius(
-    Rect.fromLTWH(0, 0, size.toDouble(), size.toDouble()),
-    const Radius.circular(36),
-  );
-  canvas.drawRRect(rrect, bgPaint);
+// Target euler (rx, ry) so face value N faces camera (+Z)
+const Map<int, List<double>> _targetRot = {
+  3: [0,          0],
+  4: [0,          pi],
+  2: [0,         -pi / 2],
+  5: [0,          pi / 2],
+  1: [-pi / 2,    0],
+  6: [ pi / 2,    0],
+};
 
-  // Border shadow effect
-  final borderPaint = Paint()
-    ..color = const Color(0xFFD4C4A0)
-    ..style = PaintingStyle.stroke
-    ..strokeWidth = 6;
-  canvas.drawRRect(rrect, borderPaint);
+Future<three.DataTexture> _makeFaceTexture(int value) async {
+  const int sz = 256;
+  final rec = ui.PictureRecorder();
+  final canvas = Canvas(rec, Rect.fromLTWH(0, 0, sz.toDouble(), sz.toDouble()));
+
+  // Ivory background with rounded rect
+  final rr = RRect.fromRectAndRadius(const Rect.fromLTWH(4, 4, 248, 248), const Radius.circular(38));
+  canvas.drawRRect(rr, Paint()..color = const Color(0xFFF5ECD7));
+  canvas.drawRRect(rr, Paint()..color = const Color(0xFFD4C0A0)..style = PaintingStyle.stroke..strokeWidth = 5);
 
   // Pips
-  final pipPaint = Paint()..color = const Color(0xFF8B1A1A);
-  final pips = _pipLayouts[value];
-  const double cx = size / 2;
-  const double cy = size / 2;
-  const double spread = 76.0;
-  const double pipR = 18.0;
-
-  for (final pip in pips) {
-    final x = cx + pip.dx * spread;
-    final y = cy + pip.dy * spread;
-    canvas.drawCircle(Offset(x, y), pipR, pipPaint);
-    // Highlight on pip
-    canvas.drawCircle(
-      Offset(x - pipR * 0.25, y - pipR * 0.25),
-      pipR * 0.35,
-      Paint()..color = Colors.white.withOpacity(0.3),
-    );
+  final pipPaint = Paint()..color = const Color(0xFF7A1515);
+  for (final pip in _pipLayouts[value]) {
+    final x = 128 + pip.dx * 80.0;
+    final y = 128 + pip.dy * 80.0;
+    canvas.drawCircle(Offset(x, y), 19, pipPaint);
+    canvas.drawCircle(Offset(x - 5, y - 5), 6, Paint()..color = Colors.white.withOpacity(0.25));
   }
 
-  final picture = recorder.endRecording();
-  final img = await picture.toImage(size, size);
-  final byteData = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
-  final bytes = byteData!.buffer.asUint8List();
+  final pic = rec.endRecording();
+  final img = await pic.toImage(sz, sz);
+  final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+  final bytes = Uint8List.fromList(bd!.buffer.asUint8List());
 
-  final texData = Uint8List(bytes.length)..setAll(0, bytes);
-  final tex = three.DataTexture(
-    texData,
-    size,
-    size,
-    three.RGBAFormat,
-  );
+  final tex = three.DataTexture(bytes, sz, sz, three.RGBAFormat);
   tex.needsUpdate = true;
   return tex;
 }
 
-// Face order for BoxGeometry in three_dart: +X, -X, +Y, -Y, +Z, -Z
-// Standard die: opposite faces sum to 7
-// Right(+X)=2, Left(-X)=5, Top(+Y)=1, Bottom(-Y)=6, Front(+Z)=3, Back(-Z)=4
-const List<int> _faceValues = [2, 5, 1, 6, 3, 4];
-
-// Target Euler rotation (x, y) so face N faces the camera (+Z)
-const Map<int, List<double>> _targetRotations = {
-  3: [0,           0],           // front +Z
-  4: [0,           pi],         // back -Z
-  2: [0,          -pi / 2],     // right +X
-  5: [0,           pi / 2],     // left -X
-  1: [-pi / 2,     0],          // top +Y
-  6: [ pi / 2,     0],          // bottom -Y
-};
-
 // ─── Main Screen ──────────────────────────────────────────────────────────────
-
 class DiceRollerScreen extends StatefulWidget {
   const DiceRollerScreen({super.key});
-
   @override
   State<DiceRollerScreen> createState() => _DiceRollerScreenState();
 }
 
 class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProviderStateMixin {
-  // three_dart
-  late FlutterGlPlugin _glPlugin;
+  // GL / three_dart
+  late FlutterGlPlugin _gl;
   three.WebGLRenderer? _renderer;
-  three.WebGLMultisampleRenderTarget? _renderTarget;
-  dynamic _sourceTexture;
+  three.WebGLMultisampleRenderTarget? _rt;
+  dynamic _srcTex;
 
   late three.Scene _scene;
   late three.PerspectiveCamera _camera;
-  late three.Mesh _diceMesh;
-  late three.AmbientLight _ambient;
-  late three.DirectionalLight _dirLight;
 
-  Size? _screenSize;
+  Size? _size;
   double _dpr = 1.0;
   bool _glReady = false;
   bool _loaded = false;
+  bool _disposed = false;
 
-  // Animation
-  late AnimationController _rollController;
-  late AnimationController _renderController;
-
-  double _rotX = 0.3;
-  double _rotY = 0.5;
-  double _rotZ = 0.0;
-
-  double _startRx = 0, _startRy = 0;
-  double _endRx = 0, _endRy = 0;
-
-  int _result = 1;
-  bool _rolling = false;
+  // Dice state
   int _numDice = 1;
   List<int> _results = [1];
-
-  // Per-die meshes for multi-dice
-  final List<three.Mesh> _diceMeshes = [];
-  final List<double> _diceRx = [];
-  final List<double> _diceRy = [];
-  List<AnimationController> _diceControllers = [];
-
+  bool _rolling = false;
   final _rand = Random();
-  List<three.Material>? _diceMaterials;
+
+  final List<three.Mesh> _meshes = [];
+  final List<double> _rx = [];
+  final List<double> _ry = [];
+
+  // Roll animation
+  List<AnimationController> _rollCtrls = [];
+  List<Animation<double>> _rxAnims = [];
+  List<Animation<double>> _ryAnims = [];
+
+  List<three.Material>? _mats;
 
   @override
   void initState() {
     super.initState();
+  }
 
-    _rollController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1800));
-    _renderController = AnimationController(vsync: this, duration: const Duration(days: 1))
-      ..repeat();
-
-    _rollController.addListener(_onRollTick);
-    _renderController.addListener(_renderFrame);
+  void _initSize(BuildContext ctx) {
+    if (_size != null) return;
+    final mq = MediaQuery.of(ctx);
+    _size = mq.size;
+    _dpr = mq.devicePixelRatio;
+    _initPlatform();
   }
 
   Future<void> _initPlatform() async {
-    final w = _screenSize!.width;
-    final h = _screenSize!.height * 0.55;
+    final w = _size!.width;
+    final h = _size!.height * 0.56;
 
-    _glPlugin = FlutterGlPlugin();
-    await _glPlugin.initialize(options: {
+    _gl = FlutterGlPlugin();
+    await _gl.initialize(options: {
       "antialias": true,
       "alpha": false,
       "width": w.toInt(),
@@ -193,211 +151,182 @@ class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProvider
     setState(() => _glReady = true);
 
     await Future.delayed(const Duration(milliseconds: 200));
-    await _glPlugin.prepareContext();
-
-    await _initScene();
+    await _gl.prepareContext();
+    await _initScene(w, h);
   }
 
-  Future<void> _initScene() async {
-    final w = _screenSize!.width;
-    final h = _screenSize!.height * 0.55;
-
+  Future<void> _initScene(double w, double h) async {
     // Renderer
     _renderer = three.WebGLRenderer({
       "width": w,
       "height": h,
-      "gl": _glPlugin.gl,
+      "gl": _gl.gl,
       "antialias": true,
-      "canvas": _glPlugin.element,
+      "canvas": _gl.element,
     });
     _renderer!.setPixelRatio(_dpr);
     _renderer!.setSize(w, h, false);
     _renderer!.shadowMap.enabled = true;
     _renderer!.shadowMap.type = three.PCFSoftShadowMap;
 
-    var pars = three.WebGLRenderTargetOptions({"format": three.RGBAFormat});
-    _renderTarget = three.WebGLMultisampleRenderTarget((w * _dpr).toInt(), (h * _dpr).toInt(), pars);
-    _renderTarget!.samples = 4;
-    _renderer!.setRenderTarget(_renderTarget);
-    _sourceTexture = _renderer!.getRenderTargetGLTexture(_renderTarget!);
+    final pars = three.WebGLRenderTargetOptions({"format": three.RGBAFormat});
+    _rt = three.WebGLMultisampleRenderTarget((w * _dpr).toInt(), (h * _dpr).toInt(), pars);
+    _rt!.samples = 4;
+    _renderer!.setRenderTarget(_rt);
+    _srcTex = _renderer!.getRenderTargetGLTexture(_rt!);
 
-    // Scene
+    // Scene & camera
     _scene = three.Scene();
     _scene.background = three.Color(0x0F2318);
 
-    // Camera
-    _camera = three.PerspectiveCamera(50, w / h, 0.1, 1000);
-    _camera.position.set(0, 0, 4.5);
+    _camera = three.PerspectiveCamera(50, w / h, 0.1, 100);
+    _camera.position.set(0, 0, 5);
+    _camera.lookAt(three.Vector3(0, 0, 0));
 
     // Lights
-    _ambient = three.AmbientLight(0xffffff, 0.5);
-    _scene.add(_ambient);
+    _scene.add(three.AmbientLight(0xffffff, 0.55));
 
-    _dirLight = three.DirectionalLight(0xffffff, 1.0);
-    _dirLight.position.set(5, 8, 5);
-    _dirLight.castShadow = true;
-    _scene.add(_dirLight);
+    final dir = three.DirectionalLight(0xfff5e0, 1.2);
+    dir.position.set(4, 6, 5);
+    dir.castShadow = true;
+    _scene.add(dir);
 
-    final fillLight = three.DirectionalLight(0xffd0a0, 0.3);
-    fillLight.position.set(-5, -3, 3);
-    _scene.add(fillLight);
+    final fill = three.DirectionalLight(0x8090ff, 0.25);
+    fill.position.set(-4, -2, 3);
+    _scene.add(fill);
 
-    // Build die face textures
+    // Build face materials
     final textures = await Future.wait(
       List.generate(6, (i) => _makeFaceTexture(_faceValues[i])),
     );
-
-    _diceMaterials = textures.map((tex) => three.MeshPhongMaterial({
-      "map": tex,
-      "shininess": 60,
-      "specular": three.Color(0x444444),
+    _mats = textures.map((t) => three.MeshPhongMaterial({
+      "map": t,
+      "shininess": 80,
+      "specular": three.Color(0x888888),
     })).toList();
 
-    // Create initial single die
-    await _rebuildDice(_numDice);
+    await _buildDice(_numDice);
 
     setState(() => _loaded = true);
+    _animate();
   }
 
-  Future<void> _rebuildDice(int count) async {
-    // Remove old meshes
-    for (final m in _diceMeshes) _scene.remove(m);
-    _diceMeshes.clear();
-    _diceRx.clear();
-    _diceRy.clear();
-    for (final c in _diceControllers) c.dispose();
-    _diceControllers = [];
+  Future<void> _buildDice(int count) async {
+    for (final m in _meshes) _scene.remove(m);
+    _meshes.clear();
+    _rx.clear();
+    _ry.clear();
+    for (final c in _rollCtrls) c.dispose();
+    _rollCtrls = [];
+    _rxAnims = [];
+    _ryAnims = [];
 
     final geo = three.BoxGeometry(1.8, 1.8, 1.8);
-
-    // Positions for multiple dice
-    final positions = _dicePositions(count);
+    final positions = _positions(count);
 
     for (int i = 0; i < count; i++) {
-      final mesh = three.Mesh(geo, _diceMaterials);
+      final mesh = three.Mesh(geo, _mats);
       mesh.position.set(positions[i].dx, positions[i].dy, 0);
       mesh.castShadow = true;
-      mesh.receiveShadow = false;
       _scene.add(mesh);
-      _diceMeshes.add(mesh);
-      _diceRx.add(0.3);
-      _diceRy.add(0.5);
+      _meshes.add(mesh);
+      _rx.add(0.4);
+      _ry.add(0.6);
 
       final ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 1800));
-      _diceControllers.add(ctrl);
+      _rollCtrls.add(ctrl);
+      _rxAnims.add(const AlwaysStoppedAnimation(0));
+      _ryAnims.add(const AlwaysStoppedAnimation(0));
     }
-
     _results = List.filled(count, 1);
   }
 
-  List<Offset> _dicePositions(int count) {
-    switch (count) {
-      case 1: return [Offset.zero];
-      case 2: return [const Offset(-1.3, 0), const Offset(1.3, 0)];
-      case 3: return [const Offset(-2.2, 0.6), const Offset(0, -0.6), const Offset(2.2, 0.6)];
-      case 4: return [const Offset(-1.5, 0.8), const Offset(1.5, 0.8), const Offset(-1.5, -0.8), const Offset(1.5, -0.8)];
-      case 5: return [const Offset(-2.5, 0.9), const Offset(0, 0.9), const Offset(2.5, 0.9), const Offset(-1.3, -0.9), const Offset(1.3, -0.9)];
-      default: return [Offset.zero];
-    }
-  }
+  List<Offset> _positions(int n) => switch (n) {
+    1 => [Offset.zero],
+    2 => [const Offset(-1.2, 0), const Offset(1.2, 0)],
+    3 => [const Offset(-2.1, 0.5), const Offset(0, -0.5), const Offset(2.1, 0.5)],
+    4 => [const Offset(-1.3, 0.8), const Offset(1.3, 0.8), const Offset(-1.3, -0.8), const Offset(1.3, -0.8)],
+    5 => [const Offset(-2.4, 0.8), const Offset(0, 0.8), const Offset(2.4, 0.8), const Offset(-1.2, -0.8), const Offset(1.2, -0.8)],
+    _ => [Offset.zero],
+  };
 
-  void _onRollTick() {
-    // Handled per-die in roll()
-  }
+  void _animate() {
+    if (_disposed || !_loaded) return;
 
-  void _renderFrame() {
-    if (!_loaded || _renderer == null) return;
-
-    // Update mesh rotations
-    for (int i = 0; i < _diceMeshes.length; i++) {
-      _diceMeshes[i].rotation.x = _diceRx[i];
-      _diceMeshes[i].rotation.y = _diceRy[i];
+    // Update mesh rotations from current state
+    for (int i = 0; i < _meshes.length; i++) {
+      _meshes[i].rotation.x = _rx[i];
+      _meshes[i].rotation.y = _ry[i];
     }
 
-    _renderer!.render(_scene, _camera);
-    _glPlugin.gl.flush();
-    _glPlugin.updateTexture(_sourceTexture);
+    _renderer?.render(_scene, _camera);
+    _gl.gl.flush();
+    if (!kIsWeb) _gl.updateTexture(_srcTex);
+
+    Future.delayed(const Duration(milliseconds: 16), _animate); // ~60fps
   }
 
   Future<void> _roll() async {
-    if (_rolling) return;
+    if (_rolling || !_loaded) return;
     setState(() => _rolling = true);
     HapticFeedback.mediumImpact();
 
     final newResults = List.generate(_numDice, (_) => _rand.nextInt(6) + 1);
-
     final futures = <Future>[];
+
     for (int i = 0; i < _numDice; i++) {
-      final target = _targetRotations[newResults[i]]!;
-      final startRx = _diceRx[i];
-      final startRy = _diceRy[i];
-      final endRx = startRx + pi * (4 + _rand.nextInt(3).toDouble()) + target[0];
-      final endRy = startRy + pi * (4 + _rand.nextInt(3).toDouble()) + target[1];
+      final tgt = _targetRot[newResults[i]]!;
+      final sRx = _rx[i], sRy = _ry[i];
+      final eRx = sRx + pi * (4 + _rand.nextInt(3)) + tgt[0];
+      final eRy = sRy + pi * (4 + _rand.nextInt(3)) + tgt[1];
 
-      final ctrl = _diceControllers[i];
-      ctrl.reset();
+      _rollCtrls[i].reset();
+      _rxAnims[i] = Tween(begin: sRx, end: eRx)
+          .animate(CurvedAnimation(parent: _rollCtrls[i], curve: Curves.easeInOutCubic));
+      _ryAnims[i] = Tween(begin: sRy, end: eRy)
+          .animate(CurvedAnimation(parent: _rollCtrls[i], curve: Curves.easeInOutCubic));
 
-      final rxAnim = Tween(begin: startRx, end: endRx)
-          .animate(CurvedAnimation(parent: ctrl, curve: Curves.easeInOutCubic));
-      final ryAnim = Tween(begin: startRy, end: endRy)
-          .animate(CurvedAnimation(parent: ctrl, curve: Curves.easeInOutCubic));
+      _rollCtrls[i].addListener(() {
+        _rx[i] = _rxAnims[i].value;
+        _ry[i] = _ryAnims[i].value;
+      });
 
-      void listener() {
-        _diceRx[i] = rxAnim.value;
-        _diceRy[i] = ryAnim.value;
-      }
-
-      ctrl.addListener(listener);
-
-      final delay = Duration(milliseconds: i * 100);
-      futures.add(Future.delayed(delay, () => ctrl.forward()));
+      futures.add(
+        Future.delayed(Duration(milliseconds: i * 120), () => _rollCtrls[i].forward()),
+      );
     }
 
     await Future.wait(futures);
-    await Future.delayed(Duration(milliseconds: 1800 + (_numDice - 1) * 100));
+    await Future.delayed(Duration(milliseconds: 1800 + (_numDice - 1) * 120));
 
-    setState(() {
-      _results = newResults;
-      _rolling = false;
-    });
+    if (mounted) {
+      setState(() {
+        _results = newResults;
+        _rolling = false;
+      });
+    }
     HapticFeedback.lightImpact();
   }
 
-  void _onPanUpdate(DragUpdateDetails d, int index) {
-    if (_rolling) return;
-    setState(() {
-      _diceRy[index] += d.delta.dx * 0.008;
-      _diceRx[index] += d.delta.dy * 0.008;
-    });
-  }
-
-  void _setNumDice(int n) {
-    if (_rolling || n < 1 || n > 5) return;
+  void _setNum(int n) {
+    if (_rolling || n < 1 || n > 5 || !_loaded) return;
     setState(() => _numDice = n);
-    _rebuildDice(n);
+    _buildDice(n);
   }
 
   @override
   void dispose() {
-    _rollController.dispose();
-    _renderController.dispose();
-    for (final c in _diceControllers) c.dispose();
+    _disposed = true;
+    for (final c in _rollCtrls) c.dispose();
+    _gl.dispose();
     super.dispose();
-  }
-
-  void _initSize(BuildContext context) {
-    if (_screenSize != null) return;
-    final mqd = MediaQuery.of(context);
-    _screenSize = mqd.size;
-    _dpr = mqd.devicePixelRatio;
-    _initPlatform();
   }
 
   @override
   Widget build(BuildContext context) {
     _initSize(context);
-    final w = _screenSize?.width ?? 400;
-    final h = (_screenSize?.height ?? 700) * 0.55;
+    final w = _size?.width ?? 400;
+    final glH = (_size?.height ?? 700) * 0.56;
     final sum = _results.fold(0, (a, b) => a + b);
 
     return Scaffold(
@@ -406,76 +335,86 @@ class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProvider
         child: Column(
           children: [
             // Header
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 14),
               child: Text('🎲  DICE ROLLER',
                   style: TextStyle(
-                    color: const Color(0xFFD4AF37),
+                    color: Color(0xFFD4AF37),
                     fontSize: 20,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 4,
-                    shadows: [Shadow(color: Colors.black54, blurRadius: 6)],
                   )),
             ),
 
-            // Dice count
+            // Count selector
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                _btn(Icons.remove, () => _setNumDice(_numDice - 1), _numDice > 1 && !_rolling),
+                _iconBtn(Icons.remove, () => _setNum(_numDice - 1), _numDice > 1 && !_rolling),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Text('$_numDice ${_numDice == 1 ? 'die' : 'dice'}',
                       style: const TextStyle(color: Colors.white70, fontSize: 15, letterSpacing: 1)),
                 ),
-                _btn(Icons.add, () => _setNumDice(_numDice + 1), _numDice < 5 && !_rolling),
+                _iconBtn(Icons.add, () => _setNum(_numDice + 1), _numDice < 5 && !_rolling),
               ],
             ),
 
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
 
-            // 3D Canvas
+            // 3D Canvas — drag to rotate first die
             GestureDetector(
-              onPanUpdate: (d) => _onPanUpdate(d, 0),
+              onPanUpdate: (d) {
+                if (_rolling || _meshes.isEmpty) return;
+                _ry[0] += d.delta.dx * 0.009;
+                _rx[0] += d.delta.dy * 0.009;
+              },
               child: Container(
                 width: w,
-                height: h,
+                height: glH,
                 color: Colors.transparent,
                 child: Builder(builder: (ctx) {
                   if (!_glReady) {
-                    return const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)));
+                    return const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          CircularProgressIndicator(color: Color(0xFFD4AF37)),
+                          SizedBox(height: 12),
+                          Text('Loading 3D engine...', style: TextStyle(color: Colors.white54)),
+                        ],
+                      ),
+                    );
                   }
                   if (kIsWeb) {
-                    return _glPlugin.isInitialized
-                        ? HtmlElementView(viewType: _glPlugin.textureId!.toString())
-                        : Container();
-                  } else {
-                    return _glPlugin.isInitialized
-                        ? Texture(textureId: _glPlugin.textureId!)
+                    return _gl.isInitialized
+                        ? HtmlElementView(viewType: _gl.textureId!.toString())
                         : Container();
                   }
+                  return _gl.isInitialized
+                      ? Texture(textureId: _gl.textureId!)
+                      : Container();
                 }),
               ),
             ),
 
-            // Result display
+            // Result
             AnimatedOpacity(
-              opacity: _rolling ? 0.3 : 1.0,
+              opacity: _rolling ? 0.25 : 1.0,
               duration: const Duration(milliseconds: 300),
               child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
+                padding: const EdgeInsets.symmetric(vertical: 8),
                 child: Column(
                   children: [
                     if (_numDice > 1)
                       Text(_results.join('  +  '),
-                          style: const TextStyle(color: Colors.white54, fontSize: 15)),
+                          style: const TextStyle(color: Colors.white54, fontSize: 14)),
                     Text(
                       _numDice > 1 ? 'Sum: $sum' : '${_results[0]}',
                       style: TextStyle(
                         color: const Color(0xFFD4AF37),
-                        fontSize: _numDice > 1 ? 26 : 52,
+                        fontSize: _numDice > 1 ? 24 : 50,
                         fontWeight: FontWeight.bold,
-                        shadows: [Shadow(color: Colors.black87, blurRadius: 8)],
                       ),
                     ),
                   ],
@@ -485,12 +424,12 @@ class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProvider
 
             // Roll button
             Padding(
-              padding: const EdgeInsets.only(bottom: 24, top: 4),
+              padding: const EdgeInsets.only(bottom: 20, top: 4),
               child: GestureDetector(
                 onTap: _roll,
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 150),
-                  padding: const EdgeInsets.symmetric(horizontal: 52, vertical: 16),
+                  padding: const EdgeInsets.symmetric(horizontal: 52, vertical: 15),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       colors: _rolling
@@ -500,7 +439,7 @@ class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProvider
                     borderRadius: BorderRadius.circular(40),
                     boxShadow: _rolling
                         ? []
-                        : [BoxShadow(color: const Color(0xFFD4AF37).withOpacity(0.4), blurRadius: 18, spreadRadius: 2)],
+                        : [BoxShadow(color: const Color(0xFFD4AF37).withOpacity(0.45), blurRadius: 18, spreadRadius: 2)],
                   ),
                   child: Text(
                     _rolling ? 'ROLLING...' : 'R O L L',
@@ -516,16 +455,17 @@ class _DiceRollerScreenState extends State<DiceRollerScreen> with TickerProvider
     );
   }
 
-  Widget _btn(IconData icon, VoidCallback cb, bool enabled) {
+  Widget _iconBtn(IconData icon, VoidCallback cb, bool enabled) {
     return GestureDetector(
       onTap: enabled ? cb : null,
       child: Container(
-        width: 34,
-        height: 34,
+        width: 34, height: 34,
         decoration: BoxDecoration(
           color: enabled ? const Color(0xFFD4AF37).withOpacity(0.15) : Colors.white10,
           shape: BoxShape.circle,
-          border: Border.all(color: enabled ? const Color(0xFFD4AF37).withOpacity(0.4) : Colors.white12),
+          border: Border.all(
+            color: enabled ? const Color(0xFFD4AF37).withOpacity(0.4) : Colors.white12,
+          ),
         ),
         child: Icon(icon, color: enabled ? const Color(0xFFD4AF37) : Colors.white24, size: 17),
       ),
